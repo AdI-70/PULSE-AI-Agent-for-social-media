@@ -1,0 +1,180 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: pulse_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pulse_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulse_password}
+      POSTGRES_DB: ${POSTGRES_DB:-pulse_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pulse_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pulse_network
+
+  # Redis for Celery
+  redis:
+    image: redis:7-alpine
+    container_name: pulse_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pulse_network
+
+  # FastAPI Backend
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pulse_backend
+    environment:
+      - DATABASE_URL=postgresql://pulse_user:pulse_password@postgres:5432/pulse_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - NEWSAPI_KEY=${NEWSAPI_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - HF_API_KEY=${HF_API_KEY}
+      - X_BEARER_TOKEN=${X_BEARER_TOKEN}
+      - X_API_KEY=${X_API_KEY}
+      - X_API_SECRET=${X_API_SECRET}
+      - X_ACCESS_TOKEN=${X_ACCESS_TOKEN}
+      - X_ACCESS_TOKEN_SECRET=${X_ACCESS_TOKEN_SECRET}
+      - MOCK_MODE=${MOCK_MODE:-false}
+      - MOCK_NEWS_ARTICLES=${MOCK_NEWS_ARTICLES:-true}
+      - MOCK_LLM_RESPONSES=${MOCK_LLM_RESPONSES:-true}
+      - MOCK_X_POSTS=${MOCK_X_POSTS:-true}
+      - APP_ENV=${APP_ENV:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your_jwt_secret_key_here}
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ./backend:/app
+    networks:
+      - pulse_network
+    restart: unless-stopped
+
+  # Celery Worker
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: pulse_worker
+    environment:
+      - DATABASE_URL=postgresql://pulse_user:pulse_password@postgres:5432/pulse_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - NEWSAPI_KEY=${NEWSAPI_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - HF_API_KEY=${HF_API_KEY}
+      - X_BEARER_TOKEN=${X_BEARER_TOKEN}
+      - X_API_KEY=${X_API_KEY}
+      - X_API_SECRET=${X_API_SECRET}
+      - X_ACCESS_TOKEN=${X_ACCESS_TOKEN}
+      - X_ACCESS_TOKEN_SECRET=${X_ACCESS_TOKEN_SECRET}
+      - MOCK_MODE=${MOCK_MODE:-false}
+      - MOCK_NEWS_ARTICLES=${MOCK_NEWS_ARTICLES:-true}
+      - MOCK_LLM_RESPONSES=${MOCK_LLM_RESPONSES:-true}
+      - MOCK_X_POSTS=${MOCK_X_POSTS:-true}
+      - NEWS_FETCH_RATE_LIMIT=${NEWS_FETCH_RATE_LIMIT:-100}
+      - GOOGLE_SEARCH_RATE_LIMIT=${GOOGLE_SEARCH_RATE_LIMIT:-90}
+      - X_POST_RATE_LIMIT=${X_POST_RATE_LIMIT:-50}
+      - LLM_REQUEST_RATE_LIMIT=${LLM_REQUEST_RATE_LIMIT:-1000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./worker:/app
+    networks:
+      - pulse_network
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+
+  # Prometheus for monitoring (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pulse_prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - pulse_network
+    profiles:
+      - monitoring
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pulse_grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - pulse_network
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  pulse_network:
+    driver: bridge

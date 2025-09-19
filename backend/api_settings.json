@@ -1,0 +1,18 @@
+{
+  "newsApiKey": "test-key",
+  "googleSearchApiKey": "test-google-key",
+  "googleSearchEngineId": "test-engine-id",
+  "openaiApiKey": "test-openai-key",
+  "huggingfaceApiKey": "test-hf-key",
+  "xApiKey": "test-x-key",
+  "xApiSecret": "test-x-secret",
+  "xAccessToken": "test-x-token",
+  "xAccessTokenSecret": "test-x-token-secret",
+  "newsFetchRateLimit": 50,
+  "googleSearchRateLimit": 45,
+  "xPostRateLimit": 25,
+  "llmRequestRateLimit": 500,
+  "mockNewsFetching": true,
+  "mockLlmSummarization": true,
+  "mockXPosting": true
+}

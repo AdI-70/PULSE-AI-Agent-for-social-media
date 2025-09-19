@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulse
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulse-config
+  namespace: pulse
+data:
+  POSTGRES_USER: "pulse_user"
+  POSTGRES_DB: "pulse_db"
+  REDIS_URL: "redis://redis:6379/0"
+  CELERY_BROKER_URL: "redis://redis:6379/0"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+  DATABASE_URL: "postgresql://pulse_user:$(POSTGRES_PASSWORD)@postgres:5432/pulse_db"
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  MOCK_MODE: "false"
+  MOCK_NEWS_ARTICLES: "false"
+  MOCK_LLM_RESPONSES: "false"
+  MOCK_X_POSTS: "false"
+  NEWS_FETCH_RATE_LIMIT: "100"
+  GOOGLE_SEARCH_RATE_LIMIT: "90"
+  X_POST_RATE_LIMIT: "50"
+  LLM_REQUEST_RATE_LIMIT: "100"
+  ENABLE_METRICS: "true"
+  METRICS_PORT: "9090"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pulse-secrets
+  namespace: pulse
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "your_postgres_password_here"
+  NEWSAPI_KEY: "your_newsapi_key_here"
+  OPENAI_API_KEY: "your_openai_key_here"
+  HF_API_KEY: "your_hf_key_here"
+  X_BEARER_TOKEN: "your_x_bearer_token_here"
+  X_API_KEY: "your_x_api_key_here"
+  X_API_SECRET: "your_x_api_secret_here"
+  X_ACCESS_TOKEN: "your_x_access_token_here"
+  X_ACCESS_TOKEN_SECRET: "your_x_access_token_secret_here"
+  JWT_SECRET_KEY: "your_jwt_secret_key_here"

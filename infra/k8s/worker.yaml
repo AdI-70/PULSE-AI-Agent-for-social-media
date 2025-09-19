@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: pulse
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+      - name: worker
+        image: pulse/worker:latest
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://pulse_user:$(POSTGRES_PASSWORD)@postgres:5432/pulse_db"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: POSTGRES_PASSWORD
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: CELERY_RESULT_BACKEND
+        - name: NEWSAPI_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: NEWSAPI_KEY
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: OPENAI_API_KEY
+        - name: HF_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: HF_API_KEY
+        - name: X_BEARER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: X_BEARER_TOKEN
+        - name: X_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: X_API_KEY
+        - name: X_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: X_API_SECRET
+        - name: X_ACCESS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: X_ACCESS_TOKEN
+        - name: X_ACCESS_TOKEN_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: pulse-secrets
+              key: X_ACCESS_TOKEN_SECRET
+        - name: MOCK_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: MOCK_MODE
+        - name: MOCK_NEWS_ARTICLES
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: MOCK_NEWS_ARTICLES
+        - name: MOCK_LLM_RESPONSES
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: MOCK_LLM_RESPONSES
+        - name: MOCK_X_POSTS
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: MOCK_X_POSTS
+        - name: NEWS_FETCH_RATE_LIMIT
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: NEWS_FETCH_RATE_LIMIT
+        - name: GOOGLE_SEARCH_RATE_LIMIT
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: GOOGLE_SEARCH_RATE_LIMIT
+        - name: X_POST_RATE_LIMIT
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: X_POST_RATE_LIMIT
+        - name: LLM_REQUEST_RATE_LIMIT
+          valueFrom:
+            configMapKeyRef:
+              name: pulse-config
+              key: LLM_REQUEST_RATE_LIMIT
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import redis; r = redis.Redis.from_url('redis://redis:6379/0'); r.ping()"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import redis; r = redis.Redis.from_url('redis://redis:6379/0'); r.ping()"
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker-hpa
+  namespace: pulse
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
