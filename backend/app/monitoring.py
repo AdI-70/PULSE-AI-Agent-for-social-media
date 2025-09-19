@@ -111,6 +111,27 @@ class Metrics:
             'pulse_active_jobs',
             'Number of active pipeline jobs'
         )
+        
+        # Security metrics
+        self.failed_auth_attempts_total = Counter(
+            'pulse_failed_auth_attempts_total',
+            'Total failed authentication attempts',
+            ['ip_address']
+        )
+        
+        # Database metrics
+        self.database_query_duration_seconds = Histogram(
+            'pulse_database_query_duration_seconds',
+            'Database query duration in seconds',
+            ['query_type']
+        )
+        
+        # Error metrics
+        self.errors_total = Counter(
+            'pulse_errors_total',
+            'Total errors by type',
+            ['component', 'error_type']
+        )
 
 
 # Global metrics instance

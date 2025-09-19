@@ -1,0 +1,5 @@
+# Testing requirements for Pulse
+pytest>=7.0.0
+pact-python>=1.0.0
+locust>=2.0.0
+litmuschaos>=2.0.0

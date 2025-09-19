@@ -1,9 +1,12 @@
-from fastapi import FastAPI, HTTPException, Depends
+import secrets
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 import structlog
 import time
+import jwt
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from prometheus_client import start_http_server as start_metrics_server
 import uvicorn
@@ -12,9 +15,13 @@ from .config import settings
 from .database import get_db, create_tables
 from .api import config, pipeline, status, api_settings
 from .monitoring import setup_logging, metrics
+from .docs.openapi_custom import custom_openapi
 
 # Setup structured logging
 logger = setup_logging()
+
+# Security
+security = HTTPBearer()
 
 # Create FastAPI app
 app = FastAPI(
@@ -41,6 +48,25 @@ app.include_router(status.router, prefix="/status", tags=["status"])
 app.include_router(api_settings.router, prefix="/api-settings", tags=["api-settings"])
 
 
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Verify JWT token for authentication."""
+    try:
+        payload = jwt.decode(credentials.credentials, settings.jwt_secret_key, algorithms=["HS256"])
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize application on startup."""
@@ -54,6 +80,9 @@ async def startup_event():
     if settings.enable_metrics:
         start_metrics_server(settings.metrics_port)
         logger.info("Metrics server started", port=settings.metrics_port)
+    
+    # Set up custom OpenAPI documentation
+    app.openapi = lambda: custom_openapi(app)
 
 
 @app.middleware("http")

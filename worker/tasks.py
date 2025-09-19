@@ -6,12 +6,16 @@ import structlog
 import time
 import json
 import asyncio
+import traceback
 
 from .celery_app import app, settings
 from .adapters.news_fetcher import NewsFetcher, PlaywrightScraper
 from .adapters.llm_adapter import LLMAdapter
 from .adapters.x_poster import XPoster
 from .utils.deduplication import DeduplicationService
+from .utils.content_ranker import get_content_ranker
+from .utils.advanced_summarizer import init_advanced_summarizer, get_advanced_summarizer
+from .utils.ab_testing import init_ab_testing_engine, get_ab_testing_engine
 from .monitoring import metrics, setup_logging
 
 # Setup logging
@@ -87,7 +91,7 @@ def get_db() -> Session:
         pass  # Don't close here, we'll close it manually
 
 
-@app.task(bind=True, name='fetch_and_post')
+@app.task(bind=True, name='fetch_and_post', max_retries=settings.retry_attempts, default_retry_delay=60)
 def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
     """
     Main pipeline task: fetch articles, summarize, and post to X.
@@ -122,11 +126,17 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
             mock_mode=settings.mock_news_articles,
             google_api_key=settings.google_api_key,
             google_search_engine_id=settings.google_search_engine_id,
-            newsapi_key=settings.newsapi_key
+            newsapi_key=settings.newsapi_key,
+            redis_url=settings.redis_url
         )
         llm_adapter = LLMAdapter(mock_mode=settings.mock_llm_responses)
         x_poster = XPoster(mock_mode=settings.mock_x_posts)
         dedup_service = DeduplicationService(db)
+        content_ranker = get_content_ranker()
+        init_advanced_summarizer(llm_adapter)
+        advanced_summarizer = get_advanced_summarizer()
+        init_ab_testing_engine()
+        ab_testing_engine = get_ab_testing_engine()
         
         results = {
             "articles_fetched": 0,
@@ -139,7 +149,7 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
         # Step 1: Fetch articles
         logger.info("Fetching articles", niche=niche)
         fetch_start_time = time.time()
-        articles = news_fetcher.fetch_articles(niche=niche, limit=5)
+        articles = news_fetcher.fetch_articles(niche=niche, limit=10)  # Fetch more articles for ranking
         fetch_duration = time.time() - fetch_start_time
         
         # Record fetch metrics
@@ -154,8 +164,15 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
             metrics.task_processed_total.labels(task_name='fetch_and_post', status='warning').inc()
             raise Exception(f"No articles found for niche: {niche}")
         
-        # Step 2: Process each article
-        for article_data in articles:
+        # Step 2: Rank articles
+        logger.info("Ranking articles", article_count=len(articles))
+        ranked_articles = content_ranker.rank_articles(articles)
+        # Select top 5 articles after ranking
+        selected_articles = ranked_articles[:5]
+        logger.info("Selected top articles after ranking", selected_count=len(selected_articles))
+        
+        # Step 3: Process each selected article
+        for article_data in selected_articles:
             try:
                 # Check for duplicates
                 if dedup_service.is_duplicate(article_data):
@@ -189,27 +206,39 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
                     for img in images:
                         logger.info("Image found", url=img.get("url"), alt=img.get("alt"))
                 
-                # Step 3: Generate summary
+                # Step 4: Generate summary
                 logger.info("Generating summary", article_id=article.id)
                 llm_start_time = time.time()
-                summary = llm_adapter.summarize_article(
-                    title=str(article.title),
-                    content=str(article.description or article.content or ""),
-                    tone="professional"  # TODO: Get from config
-                )
+                
+                # Use advanced summarizer for better quality
+                summary_result = asyncio.run(advanced_summarizer.process({
+                    "id": article.id,
+                    "title": article.title,
+                    "content": article.description or article.content or "",
+                    "niche": niche
+                }))
+                
+                summary = summary_result["content"]
                 llm_duration = time.time() - llm_start_time
                 
                 # Record LLM metrics
                 metrics.llm_request_duration_seconds.labels(provider='default', model='default').observe(llm_duration)
                 metrics.llm_requests_total.labels(provider='default', model='default', status='success').inc()
                 
-                # Step 4: Create post content
-                post_content = f"{summary}\n\nSource: {article.url}"
+                # Step 5: Create post content
+                # Generate variants for A/B testing
+                original_content = f"{summary}\n\nSource: {article.url}"
+                variants = ab_testing_engine.generate_variants(original_content)
+                
+                # For demo purposes, we'll create an experiment and select a variant
+                experiment_id = ab_testing_engine.create_experiment(f"post_{article.id}", variants)
+                selected_variant = ab_testing_engine.run_experiment(original_content, experiment_id)
+                post_content = selected_variant.content
                 
                 # Truncate to X limits (280 characters)
                 if len(post_content) > 280:
                     available_chars = 280 - len(f"\n\nSource: {article.url}") - 3  # 3 for "..."
-                    truncated_summary = summary[:available_chars] + "..."
+                    truncated_summary = post_content[:available_chars] + "..."
                     post_content = f"{truncated_summary}\n\nSource: {article.url}"
                 
                 # Save post
@@ -226,7 +255,7 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
                 
                 results["posts_created"] += 1
                 
-                # Step 5: Publish to X (if not preview mode)
+                # Step 6: Publish to X (if not preview mode)
                 if not preview_mode:
                     logger.info("Publishing to X", post_id=post.id)
                     post_start_time = time.time()
@@ -256,7 +285,7 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
                 
             except Exception as e:
                 error_msg = f"Error processing article: {str(e)}"
-                logger.error(error_msg, article_url=article_data.get("url"))
+                logger.error(error_msg, article_url=article_data.get("url"), traceback=traceback.format_exc())
                 results["errors"].append(error_msg)
                 metrics.errors_total.labels(task_name='fetch_and_post', error_type='article_processing').inc()
                 continue
@@ -274,7 +303,7 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
         
     except Exception as e:
         error_msg = str(e)
-        logger.error("Pipeline task failed", job_id=job_id, error=error_msg)
+        logger.error("Pipeline task failed", job_id=job_id, error=error_msg, traceback=traceback.format_exc())
         metrics.task_processed_total.labels(task_name='fetch_and_post', status='failure').inc()
         metrics.errors_total.labels(task_name='fetch_and_post', error_type='pipeline').inc()
         
@@ -285,8 +314,14 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
             setattr(job, 'error_message', error_msg)
             db.commit()
         
-        # Re-raise the exception for Celery
-        raise
+        # Retry the task if we haven't exceeded max retries
+        if self.request.retries < self.max_retries:
+            logger.info("Retrying task", job_id=job_id, retry_count=self.request.retries + 1)
+            raise self.retry(exc=e, countdown=60 * (self.request.retries + 1))  # Exponential backoff
+        else:
+            logger.error("Max retries exceeded for task", job_id=job_id)
+            # Re-raise the exception for Celery
+            raise
         
     finally:
         # Record task duration and decrement active tasks
@@ -296,7 +331,7 @@ def fetch_and_post(self, niche: str, job_id: str, preview_mode: bool = False):
         db.close()
 
 
-@app.task(bind=True, name='fetch_and_post_async')
+@app.task(bind=True, name='fetch_and_post_async', max_retries=settings.retry_attempts, default_retry_delay=60)
 async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool = False):
     """
     Async version of the main pipeline task: fetch articles with images, summarize, and post to X.
@@ -332,11 +367,17 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
             mock_mode=settings.mock_news_articles,
             google_api_key=settings.google_api_key,
             google_search_engine_id=settings.google_search_engine_id,
-            newsapi_key=settings.newsapi_key
+            newsapi_key=settings.newsapi_key,
+            redis_url=settings.redis_url
         )
         llm_adapter = LLMAdapter(mock_mode=settings.mock_llm_responses)
         x_poster = XPoster(mock_mode=settings.mock_x_posts)
         dedup_service = DeduplicationService(db)
+        content_ranker = get_content_ranker()
+        init_advanced_summarizer(llm_adapter)
+        advanced_summarizer = get_advanced_summarizer()
+        init_ab_testing_engine()
+        ab_testing_engine = get_ab_testing_engine()
         
         # Initialize Playwright scraper for async operation
         scraper = PlaywrightScraper()
@@ -357,7 +398,7 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
         # Try NewsAPI first
         if not settings.mock_news_articles and news_fetcher.newsapi.is_available():
             try:
-                articles = news_fetcher.newsapi.fetch_articles(niche=niche, limit=5)
+                articles = news_fetcher.newsapi.fetch_articles(niche=niche, limit=10)  # Fetch more for ranking
                 # Record fetch metrics
                 fetch_duration = time.time() - fetch_start_time
                 metrics.news_fetch_duration_seconds.labels(source='newsapi').observe(fetch_duration)
@@ -383,7 +424,7 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
                     try:
                         article = await scraper.scrape_article(url)
                         articles.append(article)
-                        if len(articles) >= 5:  # Limit to 5 articles
+                        if len(articles) >= 10:  # Limit to 10 articles for ranking
                             break
                     except Exception as e:
                         logger.warning("Failed to scrape article", url=url, error=str(e))
@@ -396,7 +437,7 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
         
         # Fallback to mock data if needed
         if not articles:
-            articles = news_fetcher.mock_fetcher.fetch_articles(niche=niche, limit=5)
+            articles = news_fetcher.mock_fetcher.fetch_articles(niche=niche, limit=10)  # Fetch more for ranking
             metrics.news_fetch_requests_total.labels(source='mock', status='success').inc()
             
         results["articles_fetched"] = len(articles)
@@ -406,8 +447,15 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
             metrics.task_processed_total.labels(task_name='fetch_and_post_async', status='warning').inc()
             raise Exception(f"No articles found for niche: {niche}")
         
-        # Step 2: Process each article
-        for article_data in articles:
+        # Step 2: Rank articles
+        logger.info("Ranking articles", article_count=len(articles))
+        ranked_articles = content_ranker.rank_articles(articles)
+        # Select top 5 articles after ranking
+        selected_articles = ranked_articles[:5]
+        logger.info("Selected top articles after ranking", selected_count=len(selected_articles))
+        
+        # Step 3: Process each selected article
+        for article_data in selected_articles:
             try:
                 # Check for duplicates
                 if dedup_service.is_duplicate(article_data):
@@ -441,27 +489,39 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
                     for img in images:
                         logger.info("Image found", url=img.get("url"), alt=img.get("alt"))
                 
-                # Step 3: Generate summary
+                # Step 4: Generate summary
                 logger.info("Generating summary", article_id=article.id)
                 llm_start_time = time.time()
-                summary = llm_adapter.summarize_article(
-                    title=str(article.title),
-                    content=str(article.description or article.content or ""),
-                    tone="professional"  # TODO: Get from config
-                )
+                
+                # Use advanced summarizer for better quality
+                summary_result = asyncio.run(advanced_summarizer.process({
+                    "id": article.id,
+                    "title": article.title,
+                    "content": article.description or article.content or "",
+                    "niche": niche
+                }))
+                
+                summary = summary_result["content"]
                 llm_duration = time.time() - llm_start_time
                 
                 # Record LLM metrics
                 metrics.llm_request_duration_seconds.labels(provider='default', model='default').observe(llm_duration)
                 metrics.llm_requests_total.labels(provider='default', model='default', status='success').inc()
                 
-                # Step 4: Create post content
-                post_content = f"{summary}\n\nSource: {article.url}"
+                # Step 5: Create post content with A/B testing
+                # Generate variants for A/B testing
+                original_content = f"{summary}\n\nSource: {article.url}"
+                variants = ab_testing_engine.generate_variants(original_content)
+                
+                # For demo purposes, we'll create an experiment and select a variant
+                experiment_id = ab_testing_engine.create_experiment(f"post_{article.id}", variants)
+                selected_variant = ab_testing_engine.run_experiment(original_content, experiment_id)
+                post_content = selected_variant.content
                 
                 # Truncate to X limits (280 characters)
                 if len(post_content) > 280:
                     available_chars = 280 - len(f"\n\nSource: {article.url}") - 3  # 3 for "..."
-                    truncated_summary = summary[:available_chars] + "..."
+                    truncated_summary = post_content[:available_chars] + "..."
                     post_content = f"{truncated_summary}\n\nSource: {article.url}"
                 
                 # Save post
@@ -478,7 +538,7 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
                 
                 results["posts_created"] += 1
                 
-                # Step 5: Publish to X (if not preview mode)
+                # Step 6: Publish to X (if not preview mode)
                 if not preview_mode:
                     logger.info("Publishing to X", post_id=post.id)
                     post_start_time = time.time()
@@ -508,7 +568,7 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
                 
             except Exception as e:
                 error_msg = f"Error processing article: {str(e)}"
-                logger.error(error_msg, article_url=article_data.get("url"))
+                logger.error(error_msg, article_url=article_data.get("url"), traceback=traceback.format_exc())
                 results["errors"].append(error_msg)
                 metrics.errors_total.labels(task_name='fetch_and_post_async', error_type='article_processing').inc()
                 continue
@@ -526,7 +586,7 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
         
     except Exception as e:
         error_msg = str(e)
-        logger.error("Pipeline task failed", job_id=job_id, error=error_msg)
+        logger.error("Pipeline task failed", job_id=job_id, error=error_msg, traceback=traceback.format_exc())
         metrics.task_processed_total.labels(task_name='fetch_and_post_async', status='failure').inc()
         metrics.errors_total.labels(task_name='fetch_and_post_async', error_type='pipeline').inc()
         
@@ -537,8 +597,14 @@ async def fetch_and_post_async(self, niche: str, job_id: str, preview_mode: bool
             setattr(job, 'error_message', error_msg)
             db.commit()
         
-        # Re-raise the exception for Celery
-        raise
+        # Retry the task if we haven't exceeded max retries
+        if self.request.retries < self.max_retries:
+            logger.info("Retrying task", job_id=job_id, retry_count=self.request.retries + 1)
+            raise self.retry(exc=e, countdown=60 * (self.request.retries + 1))  # Exponential backoff
+        else:
+            logger.error("Max retries exceeded for task", job_id=job_id)
+            # Re-raise the exception for Celery
+            raise
         
     finally:
         # Record task duration and decrement active tasks

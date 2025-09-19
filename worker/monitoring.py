@@ -143,10 +143,17 @@ class WorkerMetrics:
             'Number of active worker tasks'
         )
         
+        # Database metrics
         self.database_operations_total = Counter(
             'pulse_worker_database_operations_total',
             'Total database operations',
             ['operation', 'table', 'status']
+        )
+        
+        # Security metrics
+        self.failed_auth_attempts_total = Counter(
+            'pulse_worker_failed_auth_attempts_total',
+            'Total failed authentication attempts'
         )
 
 

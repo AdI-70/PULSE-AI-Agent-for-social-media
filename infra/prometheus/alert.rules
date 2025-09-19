@@ -1,0 +1,100 @@
+groups:
+  - name: pulse_alerts
+    rules:
+      # High error rate alerts
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status_code=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected (instance {{ $labels.instance }})"
+          description: "HTTP error rate is above 5% for more than 5 minutes\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      - alert: CriticalErrorRate
+        expr: rate(http_requests_total{status_code=~"5.."}[5m]) > 0.2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical error rate detected (instance {{ $labels.instance }})"
+          description: "HTTP error rate is above 20% for more than 2 minutes\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      # Slow response time alerts
+      - alert: SlowResponseTime
+        expr: histogram_quantile(0.95, http_request_duration_seconds_bucket) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow response time detected (instance {{ $labels.instance }})"
+          description: "HTTP request latency is above 2 seconds for more than 5 minutes\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      # Pipeline job alerts
+      - alert: LowPipelineSuccessRate
+        expr: rate(pipeline_jobs_total{status="completed"}[1h]) / rate(pipeline_jobs_total[1h]) < 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low pipeline success rate (instance {{ $labels.instance }})"
+          description: "Pipeline success rate is below 80% for more than 15 minutes\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      # Task processing alerts
+      - alert: HighTaskFailureRate
+        expr: rate(pulse_worker_tasks_processed_total{status="failure"}[30m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High task failure rate (instance {{ $labels.instance }})"
+          description: "More than 5 tasks are failing per 30 minutes\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      # Resource usage alerts
+      - alert: HighMemoryUsage
+        expr: (container_memory_usage_bytes{container!="POD",container!=""} / container_spec_memory_limit_bytes{container!="POD",container!=""}) > 0.85
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage (instance {{ $labels.instance }})"
+          description: "Container memory usage is above 85%\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      - alert: HighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total{container!="POD",container!=""}[5m]) > 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage (instance {{ $labels.instance }})"
+          description: "Container CPU usage is above 80%\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      # Database alerts
+      - alert: DatabaseDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database is down (instance {{ $labels.instance }})"
+          description: "PostgreSQL database is down\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      # Redis alerts
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down (instance {{ $labels.instance }})"
+          description: "Redis instance is down\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+      # Rate limit alerts
+      - alert: RateLimitExceeded
+        expr: rate(pulse_rate_limit_hits_total[5m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rate limit exceeded (instance {{ $labels.instance }})"
+          description: "Rate limit is being exceeded frequently\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"

@@ -5,6 +5,7 @@ import time
 import os
 from datetime import datetime, timedelta
 import json
+import redis
 
 # Add import for metrics
 try:
@@ -34,45 +35,57 @@ def _record_news_fetch_metrics(source: str, niche: str, duration: float, status:
             metrics.errors_total.labels(task_name=f'{source}_fetch', error_type=error_type).inc()
 
 
-class RateLimiter:
-    """Simple rate limiter to respect API limits."""
+class RedisRateLimiter:
+    """Rate limiter using Redis for distributed rate limiting."""
     
-    def __init__(self, max_requests: int, time_window: int = 86400):  # 86400 seconds = 24 hours
+    def __init__(self, redis_url: str, max_requests: int, time_window: int = 86400):  # 86400 seconds = 24 hours
+        self.redis_client = redis.from_url(redis_url)
         self.max_requests = max_requests
         self.time_window = time_window  # seconds
-        self.requests = []
+        self.prefix = "rate_limit"
     
-    def can_make_request(self) -> bool:
+    def _get_key(self, service: str) -> str:
+        """Generate Redis key for rate limiting."""
+        current_window = int(time.time() // self.time_window)
+        return f"{self.prefix}:{service}:{current_window}"
+    
+    def can_make_request(self, service: str) -> bool:
         """Check if we can make a request without exceeding rate limit."""
-        now = time.time()
-        # Remove old requests outside the time window
-        self.requests = [req_time for req_time in self.requests if now - req_time < self.time_window]
-        return len(self.requests) < self.max_requests
+        key = self._get_key(service)
+        current_count = self.redis_client.get(key)
+        if current_count is None:
+            return True
+        return int(current_count) < self.max_requests
     
-    def record_request(self):
+    def record_request(self, service: str):
         """Record that a request was made."""
-        self.requests.append(time.time())
+        key = self._get_key(service)
+        pipe = self.redis_client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, self.time_window)
+        pipe.execute()
     
-    def wait_time(self) -> float:
+    def wait_time(self, service: str) -> float:
         """Return how long to wait before making the next request."""
-        if self.can_make_request():
+        if self.can_make_request(service):
             return 0
         
-        if self.requests:
-            oldest_request = min(self.requests)
-            return self.time_window - (time.time() - oldest_request)
-        return 0
+        # Calculate time until the next window
+        current_time = time.time()
+        next_window = ((int(current_time) // self.time_window) + 1) * self.time_window
+        return next_window - current_time
 
 
 class GoogleSearchFetcher:
     """Google Search API integration for fetching news articles."""
     
-    def __init__(self, api_key: Optional[str] = None, search_engine_id: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, search_engine_id: Optional[str] = None, redis_url: str = "redis://localhost:6379/0"):
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
         self.search_engine_id = search_engine_id or os.getenv("GOOGLE_SEARCH_ENGINE_ID")
         self.base_url = os.getenv("GOOGLE_SEARCH_BASE_URL", "https://www.googleapis.com/customsearch/v1")
         # Initialize rate limiter for 90 requests per day
-        self.rate_limiter = RateLimiter(max_requests=90, time_window=86400)  # 24 hours
+        self.rate_limiter = RedisRateLimiter(redis_url, max_requests=90, time_window=86400)  # 24 hours
+        self.service_name = "google_search"
         # Debug logging
         logger.debug("GoogleSearchFetcher initialized", 
                     api_key_available=self.api_key is not None,
@@ -94,10 +107,10 @@ class GoogleSearchFetcher:
             raise Exception("Google Search API key or search engine ID not available")
         
         # Check rate limit
-        if not self.rate_limiter.can_make_request():
-            wait_time = self.rate_limiter.wait_time()
+        if not self.rate_limiter.can_make_request(self.service_name):
+            wait_time = self.rate_limiter.wait_time(self.service_name)
             logger.warning("Google Search API rate limit reached", wait_seconds=wait_time)
-            _record_rate_limit_hit('google_search')
+            _record_rate_limit_hit(self.service_name)
             raise Exception(f"Rate limit exceeded. Wait {wait_time:.0f} seconds.")
         
         # Map niches to search queries
@@ -158,33 +171,35 @@ class GoogleSearchFetcher:
                        count=len(articles))
             
             # Record the successful request for rate limiting
-            self.rate_limiter.record_request()
+            self.rate_limiter.record_request(self.service_name)
             
             # Record metrics
             duration = time.time() - start_time
-            _record_news_fetch_metrics('google_search', niche, duration, 'success')
+            _record_news_fetch_metrics(self.service_name, niche, duration, 'success')
             
             return articles
             
         except requests.exceptions.RequestException as e:
             logger.error("Google Search API request failed", error=str(e), status_code=getattr(e.response, 'status_code', 'N/A'))
             duration = time.time() - start_time
-            _record_news_fetch_metrics('google_search', niche, duration, 'failure', 'request')
+            _record_news_fetch_metrics(self.service_name, niche, duration, 'failure', 'request')
             raise
         except Exception as e:
             logger.error("Google Search API processing failed", error=str(e))
             duration = time.time() - start_time
-            _record_news_fetch_metrics('google_search', niche, duration, 'failure', 'processing')
+            _record_news_fetch_metrics(self.service_name, niche, duration, 'failure', 'processing')
             raise
 
 
 class NewsAPIFetcher:
     """NewsAPI.org integration for fetching news articles."""
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, redis_url: str = "redis://localhost:6379/0"):
         self.api_key = api_key or os.getenv("NEWSAPI_KEY")
         self.base_url = "https://newsapi.org/v2"
         self.headers = {"X-API-Key": self.api_key} if self.api_key else {}
+        self.rate_limiter = RedisRateLimiter(redis_url, max_requests=100, time_window=3600)  # 100 requests per hour
+        self.service_name = "newsapi"
     
     def is_available(self) -> bool:
         return self.api_key is not None
@@ -193,6 +208,13 @@ class NewsAPIFetcher:
         """Fetch articles from NewsAPI for a specific niche."""
         if not self.is_available():
             raise Exception("NewsAPI key not available")
+        
+        # Check rate limit
+        if not self.rate_limiter.can_make_request(self.service_name):
+            wait_time = self.rate_limiter.wait_time(self.service_name)
+            logger.warning("NewsAPI rate limit reached", wait_seconds=wait_time)
+            _record_rate_limit_hit(self.service_name)
+            raise Exception(f"Rate limit exceeded. Wait {wait_time:.0f} seconds.")
         
         # Map niches to search queries
         niche_queries = {
@@ -245,21 +267,24 @@ class NewsAPIFetcher:
                        count=len(filtered_articles),
                        total_available=data.get("totalResults", 0))
             
+            # Record the successful request for rate limiting
+            self.rate_limiter.record_request(self.service_name)
+            
             # Record metrics
             duration = time.time() - start_time
-            _record_news_fetch_metrics('newsapi', niche, duration, 'success')
+            _record_news_fetch_metrics(self.service_name, niche, duration, 'success')
             
             return filtered_articles
             
         except requests.exceptions.RequestException as e:
             logger.error("NewsAPI request failed", error=str(e))
             duration = time.time() - start_time
-            _record_news_fetch_metrics('newsapi', niche, duration, 'failure', 'request')
+            _record_news_fetch_metrics(self.service_name, niche, duration, 'failure', 'request')
             raise
         except Exception as e:
             logger.error("NewsAPI processing failed", error=str(e))
             duration = time.time() - start_time
-            _record_news_fetch_metrics('newsapi', niche, duration, 'failure', 'processing')
+            _record_news_fetch_metrics(self.service_name, niche, duration, 'failure', 'processing')
             raise
 
 
@@ -541,10 +566,10 @@ class MockNewsFetcher:
 class NewsFetcher:
     """Main news fetcher that tries multiple sources."""
     
-    def __init__(self, mock_mode: bool = False, google_api_key: Optional[str] = None, google_search_engine_id: Optional[str] = None, newsapi_key: Optional[str] = None):
+    def __init__(self, mock_mode: bool = False, google_api_key: Optional[str] = None, google_search_engine_id: Optional[str] = None, newsapi_key: Optional[str] = None, redis_url: str = "redis://localhost:6379/0"):
         self.mock_mode = mock_mode
-        self.newsapi = NewsAPIFetcher(api_key=newsapi_key)
-        self.google_fetcher = GoogleSearchFetcher(api_key=google_api_key, search_engine_id=google_search_engine_id)
+        self.newsapi = NewsAPIFetcher(api_key=newsapi_key, redis_url=redis_url)
+        self.google_fetcher = GoogleSearchFetcher(api_key=google_api_key, search_engine_id=google_search_engine_id, redis_url=redis_url)
         self.scraper = None  # Initialize when needed
         self.mock_fetcher = MockNewsFetcher()
     

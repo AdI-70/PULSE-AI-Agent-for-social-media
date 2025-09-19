@@ -1,24 +1,46 @@
+# Prometheus configuration for Pulse monitoring
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
 rule_files:
-  # - "first_rules.yml"
-  # - "second_rules.yml"
+  # Alert rules
+  - "alert.rules"
 
 scrape_configs:
+  # Scrape Pulse backend metrics
   - job_name: 'pulse-backend'
     static_configs:
       - targets: ['backend:8000']
     metrics_path: '/metrics'
-    scrape_interval: 30s
+    scrape_interval: 10s
 
+  # Scrape Pulse worker metrics
   - job_name: 'pulse-worker'
     static_configs:
-      - targets: ['worker:9090']
+      - targets: ['worker:8000']
     metrics_path: '/metrics'
-    scrape_interval: 30s
+    scrape_interval: 10s
 
-  - job_name: 'prometheus'
+  # Scrape Redis metrics
+  - job_name: 'redis'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['redis:9121']
+    scrape_interval: 15s
+
+  # Scrape PostgreSQL metrics
+  - job_name: 'postgresql'
+    static_configs:
+      - targets: ['postgres:9187']
+    scrape_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # Alertmanager running in the same Docker network
+          - alertmanager:9093
+
+# Alert rules
+rule_files:
+  - "/etc/prometheus/alert.rules"

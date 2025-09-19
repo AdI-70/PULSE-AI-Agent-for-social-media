@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     newsapi_key: Optional[str] = None
     newsapi_base_url: str = "https://newsapi.org/v2"
     
+    # Google Search API
+    google_api_key: Optional[str] = None
+    google_search_engine_id: Optional[str] = None
+    google_search_base_url: str = "https://www.googleapis.com/customsearch/v1"
+    
     # LLM Providers
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-3.5-turbo"
@@ -43,12 +48,26 @@ class Settings(BaseSettings):
     
     # Rate Limiting
     news_fetch_rate_limit: int = 100
+    google_search_rate_limit: int = 90
     x_post_rate_limit: int = 50
     llm_request_rate_limit: int = 1000
     
     # Monitoring
     enable_metrics: bool = True
     metrics_port: int = 9090
+    
+    # Security
+    encryption_key: Optional[str] = None
+    enable_tls: bool = False
+    tls_cert_path: Optional[str] = None
+    tls_key_path: Optional[str] = None
+    
+    # Advanced settings
+    max_concurrent_jobs: int = 10
+    job_timeout_seconds: int = 1800  # 30 minutes
+    retry_attempts: int = 3
+    enable_caching: bool = True
+    cache_ttl_seconds: int = 3600  # 1 hour
     
     class Config:
         env_file = ".env"

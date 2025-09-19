@@ -2,23 +2,39 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
+from sqlalchemy.pool import QueuePool
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Generator
 import hashlib
 import os
+import time
+import structlog
 
 from .config import settings
+from .monitoring import metrics
+
+logger = structlog.get_logger()
 
 # Database setup
 # Use SQLite in-memory database for testing if PostgreSQL is not available
 try:
-    engine = create_engine(settings.database_url)
+    # Enhanced connection pooling
+    engine = create_engine(
+        settings.database_url,
+        poolclass=QueuePool,
+        pool_size=20,
+        max_overflow=40,
+        pool_timeout=30,
+        pool_recycle=3600,
+        pool_pre_ping=True,
+        echo=False
+    )
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base = declarative_base()
     DATABASE_AVAILABLE = True
 except Exception as e:
-    print(f"Database connection failed: {e}")
-    print("Using in-memory SQLite database for testing")
+    logger.error("Database connection failed", error=str(e))
+    logger.info("Using in-memory SQLite database for testing")
     engine = create_engine("sqlite:///:memory:")
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base = declarative_base()
@@ -88,20 +104,24 @@ class Job(Base):
     result = Column(JSON)  # Job results and metadata
 
 
-# Dependency to get DB session
+# Dependency to get DB session with monitoring
 def get_db() -> Generator[Session, None, None]:
+    start_time = time.time()
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+        duration = time.time() - start_time
+        metrics.database_query_duration_seconds.labels(query_type='session').observe(duration)
 
 
 # Create all tables
 def create_tables():
     try:
         Base.metadata.create_all(bind=engine)
+        logger.info("Database tables created/verified")
     except Exception as e:
-        print(f"Failed to create tables: {e}")
+        logger.error("Failed to create tables", error=str(e))
         # Continue without database tables for testing
         pass

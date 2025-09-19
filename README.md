@@ -245,6 +245,10 @@ See [infra/k8s/README.md](infra/k8s/README.md) for detailed Kubernetes deploymen
 - ConfigMaps and Secrets for configuration management
 - Ingress for external access
 - Resource limits and requests for optimal performance
+- Advanced content ranking system
+- Multi-stage summarization with fact-checking
+- A/B testing framework for content optimization
+- Comprehensive security with JWT authentication and encryption
 
 ## 🔧 Configuration
 
@@ -301,6 +305,8 @@ The backend exposes Prometheus metrics at `/metrics` endpoint:
 - Pipeline job metrics
 - System resource usage
 - Error rates
+- Custom business metrics
+- Alerting rules for system health
 
 ### Structured Logging
 
@@ -336,6 +342,8 @@ All components use structured JSON logging for better observability:
 - Database encryption at rest
 - Secure connection strings
 - Regular security audits
+- Field-level encryption for sensitive data
+- Redis-based rate limiting to prevent abuse
 
 ## 🔄 Extensibility
 
@@ -350,6 +358,12 @@ All components use structured JSON logging for better observability:
 1. Create a new poster class similar to `XPoster`
 2. Update the worker task to support the new platform
 3. Add platform-specific configuration
+
+### Advanced Pipeline Features
+
+- Content ranking algorithms can be customized in [worker/utils/content_ranker.py](worker/utils/content_ranker.py)
+- A/B testing strategies can be extended in [worker/utils/ab_testing.py](worker/utils/ab_testing.py)
+- Multi-stage summarization can be enhanced in [worker/utils/advanced_summarizer.py](worker/utils/advanced_summarizer.py)
 
 ## 📈 Performance Optimization
 
@@ -371,6 +385,12 @@ Key indexes are created automatically:
 - Multiple worker instances for parallel processing
 - Backend replicas for high availability
 - Redis clustering for large deployments
+
+### Advanced Optimizations
+
+- Composite indexing strategies in [infra/postgres/advanced_optimizations.sql](infra/postgres/advanced_optimizations.sql)
+- Materialized views for analytics
+- Table partitioning for large datasets
 
 ## 🛠️ Troubleshooting
 
@@ -431,6 +451,10 @@ Once running, visit `http://localhost:8000/docs` for interactive API documentati
 - Dynamic tool selection
 - Memory and decision loops
 - Advanced analytics and reporting
+- Microservices architecture
+- Event-driven processing with Kafka/RabbitMQ
+- Comprehensive testing strategy (contract, load, chaos)
+- Business intelligence features (real-time analytics, predictive analytics)
 
 ## 🤝 Contributing
 
